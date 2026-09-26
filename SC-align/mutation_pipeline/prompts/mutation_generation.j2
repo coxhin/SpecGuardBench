@@ -1,0 +1,275 @@
+You are an expert software engineer generating spec-violating mutations for a code analysis pipeline.
+
+## Task
+
+Given a targeted spec and the gold patch implementation, generate:
+1. A **clean mutant**: A minimal code change that violates the targeted spec while preserving all other specs. The mutation should be subtle — not a wholesale deletion but a behavioral change.
+2. A **witness factory**: A Python module defining `build_cases()` that yields fresh, valid call cases which expose the violation.
+3. A **private observer**: A Python module defining `observe_case(case)` that calls the implementation and returns a JSON-serializable observation. This observer is used only to validate the mutation and is never shown to evaluated baselines.
+
+## Constraints on the Mutation
+
+1. The mutation must **violate the targeted spec** while **preserving all other specs** listed below. Study the other specs carefully — your mutation must not break any of them. If the targeted spec shares code with another spec, find a mutation that is surgical enough to violate only the targeted property.
+2. **Mutate only against properties the targeted spec's text actually states.** Do not extend the spec by introducing requirements it does not state — when the spec is silent on a property, both the gold implementation and any alternative behaviour along that property satisfy the spec equally, so a mutation that targets such an unstated property does not actually violate the spec. It only violates your interpretation of the spec. Read the spec text literally; if a behavioural property is not explicitly stated and is not the unambiguous direct meaning of the words used, treat that property as unconstrained by the spec and do not mutate against it. If the targeted spec is too vague to support a concrete violation, return empty `witness_factory` and `witness_observer` fields rather than fabricating a stretch.
+3. The mutation must **pass the original test cases** (f2p and p2p tests). The existing test cases are provided below — study them carefully to ensure your mutation does not trigger any test failures.
+4. The mutation must be observable through the deterministic value returned by `observe_case(case)`. Observing an effect may take work inside the observer — see "The observation is the return value" below for the method. Reject the task with empty witness fields only if, having applied that method, the effect really cannot be reached from inside the call.
+
+## Trigger Reachability (HARD)
+
+The certificate author who will be evaluated against this mutation sees two
+things: the targeted spec text, and the **correct implementation**. They never
+see your mutation. Your mutation is only usable if such an author could
+plausibly reach a triggering input from those two sources.
+
+Before finalizing, state the triggering condition in one sentence and put it in
+the `trigger_condition` field. Then apply this test:
+
+  Hand the spec and the correct implementation to a competent, diligent tester
+  who is systematically enumerating inputs that exercise what the spec
+  requires. Would their enumeration plausibly include an input that triggers
+  your mutation?
+
+- If the trigger is a specific literal value, environment state, call ordering,
+  type distinction, or scale threshold that exists **only inside your
+  mutation** — nothing in the spec or the correct implementation would lead
+  anyone to it — the mutation is invalid. Choose a different one.
+- A narrow trigger is fine, even ideal, as long as it is reachable. Boundaries
+  the spec names or entails (empty, zero, negative, the exact threshold, a
+  sentinel the spec mentions), and boundaries the correct implementation
+  visibly treats specially, are all legitimate. Narrowness is not the problem;
+  unreachability is.
+- The trigger must be deterministic: the same input must produce the divergence
+  on every run. Do not rely on randomness, hash or dict iteration order,
+  wall-clock time, memory addresses, platform, or Python version.
+
+The same reachability requirement applies to the **observation channel**.
+Diverge only through channels the spec text would lead a certificate author to
+check: what the call does (return value, raised exception, side effect), or —
+for a spec whose text states a `def` line — the runtime API surface that line
+displays (signature, annotations). A divergence visible only in documentation
+(`__doc__`) is legitimate **only when the spec text itself names the
+documentation as its subject** (e.g. "the docstring states ..."); a spec that
+merely *describes* behaviour or structure does not license a
+documentation-only mutation, however closely its wording matches the
+docstring. Comments have no runtime surface and are never a valid divergence
+channel. If the only way to violate the targeted spec is through a channel
+this rule forbids, do not fabricate the mutation — refuse as in Constraint 2
+(empty `witness_factory` and `witness_observer` fields) and say why.
+
+## Factory/Observer Requirements (HARD)
+
+- The case protocol is fixed by the pipeline. Every yielded case must be exactly
+  `{"args": <tuple-or-list>, "kwargs": <dict-with-string-keys>}`.
+- `args` and `kwargs` are passed to the target as positional and keyword
+  arguments. Do not invent any other case schema or add extra keys.
+- The public protocol does not narrow argument values beyond the targeted
+  natural-language spec and the target's public calling interface. This hidden
+  witness may yield any valid subset needed to expose the violation.
+- `witness_factory` must define `build_cases()` and yield one or more fresh valid call cases.
+- Cases must contain stimulus only. Do not include expected outcomes, expected exceptions, failure flags, or mutant-specific information.
+- `witness_factory` must not contain assertions or inspect the mutant.
+- `witness_observer` must expose the actual callable under test as a module-level
+  global named `target`, then define `observe_case(case)` and call that exact
+  global with `target(*case["args"], **case["kwargs"])`. Bind `target` directly
+  to an imported function or method; do not define a wrapper named `target`.
+- When `target` is taken from a class rather than an instance, cases must include
+  the receiver object as the first positional argument. For example,
+  `target = Pipeline.in_` requires `args=(pipeline, values)`, while the already
+  bound `target = pipeline.in_` requires only `args=(values,)`.
+- The observer must not assert. Gold/mutant divergence comes from comparing its returned observations.
+- Reversible monkeypatching may be used when helpful. Restore patched state with
+  `try/finally`, including around a yielded case when the patch must remain
+  active while the observer runs.
+- Setup, monkeypatching, exception capture, and side-effect inspection may
+  surround the target call, but the observer must not omit, replace, reorder,
+  or reinterpret the case's positional or keyword arguments.
+
+### The observation is the return value, and only the return value
+
+`observe_case` returns a JSON-serializable value, and that value is the entire
+observation. Nothing else the code does during the call is looked at.
+
+So the question to answer before writing the observer is: **what does this
+mutation make different, and how do I get that difference into the returned
+value?** Whatever the answer — a returned object, an exception, a mutated
+argument, a file on disk, a call the target made to something else — you
+inspect it yourself inside `observe_case` and put what you found in the dict
+under a name you choose. The return value is an arbitrary structure, so there
+is nothing you can observe that you cannot return.
+
+```python
+def observe_case(case):
+    args, kwargs = tuple(case["args"]), dict(case["kwargs"])
+    try:
+        result = target(*args, **kwargs)
+    except Exception as exc:
+        return {"raised": type(exc).__name__, "message": str(exc)}
+    return {"dtype": str(result.dtype), "values": result.tolist()}
+```
+
+Pick the keys that carry the property you are targeting and leave the rest
+out. An observation stuffed with unrelated state moves for reasons the spec
+never mentioned, which gets the mutation rejected.
+
+Some effects are not sitting in the return value and need a step to make them
+inspectable. The method is always the same three moves:
+
+> **arrange to capture → call the target → return what you captured.**
+
+Below are worked instances of that method. They are examples, **not a list of
+what counts as observable** — the method is the rule, and it applies to
+effects that are not listed here:
+
+| what the mutation changes | how to observe it |
+|---|---|
+| the returned object | read the fields the spec talks about |
+| whether/what it raises | `try/except`, return the type and message |
+| an argument, in place | snapshot before the call, read it back after |
+| module or class state | read it after the call |
+| a file it writes | read the file back |
+| who it calls, and how | monkeypatch the collaborator with a recorder, return the recorded calls |
+| a warning it emits | `warnings.catch_warnings(record=True)` with `simplefilter("always")`, return `(category, message)` pairs |
+| what it logs | attach a temporary `logging.Handler`, return `(level, message)` pairs |
+| what it prints | `contextlib.redirect_stdout(io.StringIO())`, return the captured text |
+
+**If what your mutation changes is not in that table, apply the method
+anyway.** Work out where the effect becomes visible to ordinary Python — an
+attribute, a data structure, a resource, a second call that behaves
+differently because of the first — reach it from inside `observe_case`, and
+return it. Reaching it may take several statements, a second call, a
+temporary subclass, or a monkeypatched hook; all of that is allowed, provided
+the call to `target` itself still passes the case's own `args` and `kwargs`
+unaltered.
+
+There are only two kinds of effect this genuinely cannot reach: output
+written straight to file descriptor 1 or 2 by a subprocess or a C extension,
+and effects that happen after `observe_case` returns (`atexit`, `__del__`, a
+background thread). If your mutation is observable *only* through one of
+those, choose a different mutation. **Do not conclude that a spec is
+unmutatable merely because its effect was not in the table** — return empty
+witness fields only when you have tried the method and the effect really is
+unreachable from inside the call.
+
+The stream rows above are also the reason for a hard rule: **neither module
+may call `print()` or write to `sys.stdout` / `sys.stderr`.** Those writes are
+discarded. Writing to the stream looks like observing but is not: the same
+stream carries whatever the testbed emits on its own, the two runs do not
+produce that identically, and a warning's default rendering even embeds
+`file.py:LINE:`, which shifts when a mutation changes a file's line count.
+Capturing gives you the same information scoped to the call, attributable to
+it, and in a form you can normalize before returning.
+
+Every value you return must be JSON-serializable and identical across two
+runs of identical code. `repr()` of an object without a custom `__repr__`
+embeds its memory address; sets and dicts may iterate in a different order;
+extract and sort what you care about instead.
+
+The pipeline supplies the public case contract statically, validates every case,
+and automatically builds and executes the pytest witness from these two modules.
+You do not write the test file; these two modules are the whole witness.
+
+## Input
+
+### Targeted Spec
+- ID: {{ spec.spec_id }}
+- Text: {{ spec.text }}
+- Category: {{ spec.category }}
+- Code mapping:
+{% for cm in spec.code_mapping %}
+  - File: {{ cm.file }}, Lines: {{ cm.lines }}, Function: {{ cm.function }}
+{% endfor %}
+
+{% if other_specs %}
+### Other Specs (must NOT be violated)
+
+Your mutation must preserve all of the following specs. Pay special attention to specs that map to the same code region as your targeted spec — these are the ones most at risk of accidental violation.
+
+{% for other in other_specs %}
+- **{{ other.spec_id }}** [{{ other.category }}]: {{ other.text }}
+{%- for cm in other.code_mapping %}
+  ({{ cm.file }}:{{ cm.lines }}, `{{ cm.function }}`)
+{%- endfor %}
+{% endfor %}
+{% endif %}
+
+### Gold Patch Implementation
+```diff
+{{ gold_patch }}
+```
+
+### Existing Test Cases
+
+The mutation must pass all of these tests. Study them to understand what behaviors are tested and craft your mutation to avoid triggering failures.
+
+**Fail-to-pass (f2p) test identifiers:**
+{% if fail_to_pass %}
+{% for test_id in fail_to_pass %}
+- `{{ test_id }}`
+{% endfor %}
+{% else %}
+(none)
+{% endif %}
+
+**Pass-to-pass (p2p) test identifiers:**
+{% if pass_to_pass %}
+{% for test_id in pass_to_pass %}
+- `{{ test_id }}`
+{% endfor %}
+{% else %}
+(none)
+{% endif %}
+
+{% if test_patch %}
+**Test patch** (diff showing the test code):
+```diff
+{{ test_patch }}
+```
+{% endif %}
+
+## Output Format
+
+Return a JSON object. For the mutation, provide **find/replace pairs** on the source code (NOT a unified diff). Each pair specifies an exact multi-line code snippet to find and its replacement. The `find` string must match the source code exactly (including whitespace/indentation).
+
+```json
+{
+  "mutations": [
+    {
+      "file": "relative/path/to/file.py",
+      "find": "    exact original code\n    to find (multiple lines ok)",
+      "replace": "    mutated code\n    replacement"
+    }
+  ],
+  "mutation_strategy": "Brief description of what was changed and why it violates the targeted spec.",
+  "trigger_condition": "One sentence stating the condition under which the mutant diverges, using only concepts from the targeted spec or visible in the correct implementation.",
+  "witness_factory": "Complete Python module defining build_cases().",
+  "witness_observer": "Complete Python module defining observe_case(case).",
+  "divergence_type": "Free-text label for what kind of thing moved, for analysis only — e.g. value, state, files, calls, exception, mixed. Use your own word if none of those fit."
+}
+```
+
+Important notes for `mutations`:
+- The `file` path should be relative to the repo root (e.g., `astropy/visualization/basic_rgb.py`), NOT starting with `/testbed/`.
+- The `find` string must be an **exact** substring of the current source file. Copy it verbatim from the gold patch `+` lines (without the `+` prefix). Include enough surrounding context to be unique.
+- Keep mutations minimal — change as few lines as possible.
+
+## Reasoning Before the JSON
+
+You SHOULD reason out loud before emitting the final JSON. Before declaring
+the factory protocol unobservable, explicitly enumerate at least
+three candidate observation strategies (return value, monkey-patched
+attribute access, dependency call counts via `unittest.mock`, log capture
+via `caplog`, captured stdout via `capsys`, file-system snapshot via
+`tmp_path`, raised-exception type, etc.) and explain why each fails for
+the targeted spec. Likewise, before declaring a mutation that breaks F2P
+or P2P tests, consider guarded variants (`if non_default_arg_provided:
+return mutated_value else: return original`) that the existing tests —
+which only cover default args — wouldn't notice.
+
+If your reasoning leads you to revise an earlier draft, **revise in
+place**: emit ONE final JSON block at the very end of your response. Do
+NOT leave behind earlier ```json blocks with superseded content. The
+parser reads the last fenced JSON block, but emitting drafts wastes
+tokens and clutters the artifact.
+
+Output the final JSON inside a single ```json fenced block at the end of
+your response.

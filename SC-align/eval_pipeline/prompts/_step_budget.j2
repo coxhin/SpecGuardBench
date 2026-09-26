@@ -1,0 +1,11 @@
+{%- if max_agent_steps %}
+## Step budget
+
+You have {{ max_agent_steps }} steps for this task. One step is one reply of yours,
+whether or not it calls a tool.
+
+At the limit you are stopped immediately, mid-work and without warning. Whatever
+`/tmp/eval_output.json` holds at that moment is the entire result; nothing else
+you leave behind is read. Write that file as soon as you have something valid,
+and improve it in place afterwards.
+{% endif -%}

@@ -1,0 +1,8 @@
+## Background
+
+LLM-A was given:
+1. A *targeted* spec to violate.
+2. A list of *other* specs to preserve.
+3. A code base whose gold implementation satisfies all of these specs.
+
+LLM-A produced a code mutation and a *witness*: a factory that builds call cases and an observer that calls the implementation on each case and **returns** a JSON observation. The pipeline ran that witness twice, once against the mutant code and once against gold, and compared the returned observations.

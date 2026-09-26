@@ -1,0 +1,91 @@
+## Inputs
+
+### Targeted spec
+- ID: {{ spec.spec_id }}
+- Category: {{ spec.category }}
+- Text: {{ spec.text }}
+
+{% if other_specs %}
+### Other specs (must remain intact)
+{% for o in other_specs %}
+- **{{ o.spec_id }}** [{{ o.category }}]: {{ o.text }}
+{% endfor %}
+{% endif %}
+
+### LLM-A's stated mutation strategy
+{{ mutation_strategy }}
+
+### LLM-A's stated trigger condition
+{{ trigger_condition | default('(not supplied)') }}
+
+### Mutant patch (the actual code change)
+```diff
+{{ mutant_patch }}
+```
+
+### Witness script (pytest test, run identically on gold and mutant)
+```python
+{{ witness_script }}
+```
+
+{% if case_contract | default('') %}
+### Public case contract shown to evaluated baselines
+```
+{{ case_contract | default('') }}
+```
+
+### Hidden witness factory
+```python
+{{ witness_factory | default('') }}
+```
+
+### Hidden observer
+```python
+{{ witness_observer | default('') }}
+```
+
+{% if judge_case_contract | default(false) %}
+Reject as `overreach` if the public case contract includes the concrete hidden
+witness value, mutant guard, threshold, sentinel, or expected outcome rather
+than only the general case shape and validity constraints.
+{% endif %}
+{% endif %}
+
+### Gold-implementation observation (returned by observe_case, one line per case)
+```
+{{ actual_gold_output }}
+```
+
+### Mutant-implementation observation (returned by observe_case, one line per case)
+```
+{{ actual_mutant_output }}
+```
+
+{% if gold_stray_output | default('') or mutant_stray_output | default('') %}
+### Stray output — NOT part of the observation
+
+Everything else the two runs wrote to the terminal while the witness executed:
+the testbed's build and import chatter, warnings, log records, anything the
+implementation printed on its own. It is shown for context and takes no part
+in the comparison above.
+
+Two arms rarely produce identical stray output — the mutant runs on a
+freshly patched testbed and gold on a freshly reset one — so differences here
+are expected and mean nothing on their own. Do **not** treat them as evidence
+of a violation.
+
+One thing to watch for: if the property that would prove this violation
+appears *here* rather than in the observation above, the observer failed to
+capture something it should have returned. Reject as `noise` and say what it
+should have captured.
+
+Gold:
+```
+{{ gold_stray_output | default('') }}
+```
+
+Mutant:
+```
+{{ mutant_stray_output | default('') }}
+```
+{% endif %}

@@ -1,0 +1,135 @@
+
+You are generating **executable certificates** that verify whether a function implementation aligns with a set of natural-language specifications.
+
+This run uses the **saved-inputs harness form**. You should explore the implementation yourself, collect high-value inputs, and return deterministic pytest certificates that replay those inputs.
+
+## Inputs available in the container
+
+- `/testbed/` — the codebase **as currently shipped**
+- `/testbed/specs.json` — the surviving specs you must write certificates for
+- `/testbed/saved_inputs_harness_guide.md` — the canonical guide to the saved-inputs certificate vocabulary you MUST follow. **Read it before writing any certificate.**
+
+## What you must produce
+
+For each spec in `/testbed/specs.json`, write **one** executable certificate entry. Each entry contains:
+
+- `inputs_file`: the path `/tmp/eval_saved_inputs/<spec_id>.jsonl`, where you saved one JSON object per replay case.
+- `code`: a self-contained pytest file that loads `AGENT_SAVED_INPUTS_PATH` and replays those saved inputs with assertions.
+
+The certificate:
+
+- Tests the spec from **outside** the function under test, through its public interface only.
+- May contain one or multiple `test_*` functions with assertions, `pytest.raises`, `pytest.warns`, `caplog`, `tmp_path`, `monkeypatch`, or `unittest.mock.patch(..., wraps=original)`.
+- Must be deterministic and use only the saved JSONL inputs as its input corpus.
+
+## Hard rules (non-negotiable)
+
+1. **No edits to the source under test.** Do not modify any file in `/testbed/` other than temporary exploration artifacts and your final `/tmp/eval_output.json`.
+
+2. **No reference implementation.** Verify behavioural properties of the spec.
+
+3. **Save all replay inputs in JSONL.** Write one JSON object per line to `/tmp/eval_saved_inputs/<spec_id>.jsonl`; do not rely on any other temporary files.
+
+4. **Use JSON-serializable records only.** Each JSONL line should contain only the data needed to replay the case, for example `{"args": [...], "kwargs": {...}}`. For complex objects, store constructor kwargs, primitive fields, path/content pairs, or recipe dictionaries that your pytest code reconstructs. Do **not** include a `why` field.
+
+5. **Final certificate is replay-only.** The final pytest file must only replay the saved inputs. Do not launch input generation or use property-based generation decorators in the final certificate.
+
+6. **Match exception type AND message for exception specs:** `pytest.raises(ExceptionType, match="<keyword from spec>")`.
+
+7. **Use `wraps=original` when observing the call graph** (`unittest.mock.patch(target, wraps=original)`). Bare `Mock()` breaks the test.
+
+8. **Patch where the target is looked up, not where it is defined.**
+
+## Structural examples
+
+These examples show the expected shape only. Adapt the keys, reconstruction
+logic, imports, and assertions to the target spec.
+
+Example JSONL sidecar at `/tmp/eval_saved_inputs/<spec_id>.jsonl`:
+
+```jsonl
+{"args": ["abc", 3], "kwargs": {"strict": true}}
+{"args": [], "kwargs": {"text": "", "mode": "strict"}}
+{"tmp_files": [{"name": "input.txt", "content": "alpha\nbeta\n"}], "args": ["input.txt"], "kwargs": {"encoding": "utf-8"}}
+{"object": {"class": "Request", "fields": {"path": "/items", "headers": {"Accept": "application/json"}}}, "kwargs": {"normalize": true}}
+```
+
+Each line is a separate JSON object. Do not wrap the file in `[...]`, and do
+not add non-replay fields such as `why`.
+
+Example loader and replay structure:
+
+```python
+import json
+import os
+
+from package.module import function_under_test
+
+
+def _load_cases():
+    with open(os.environ["AGENT_SAVED_INPUTS_PATH"], "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+
+def test_saved_inputs_satisfy_spec():
+    for case in _load_cases():
+        result = function_under_test(*case.get("args", []), **case.get("kwargs", {}))
+        # Replace this placeholder with concrete assertions from the spec.
+        assert property_required_by_spec(result)
+```
+
+Example filesystem reconstruction:
+
+```python
+def test_saved_file_inputs(tmp_path):
+    for case in _load_cases():
+        for file_record in case.get("tmp_files", []):
+            path = tmp_path / file_record["name"]
+            path.write_text(file_record["content"], encoding="utf-8")
+
+        args = [str(tmp_path / name) for name in case.get("args", [])]
+        result = function_under_test(*args, **case.get("kwargs", {}))
+        # Replace this placeholder with concrete assertions from the spec.
+        assert file_property_required_by_spec(result)
+```
+
+## Specifications
+
+{% for spec in specs %}
+### {{ spec.spec_id }}: {{ spec.category }}
+{{ spec.text }}
+
+{% endfor %}
+
+## Procedure
+
+1. Read `/testbed/saved_inputs_harness_guide.md` end-to-end.
+2. For each spec, locate the relevant code in `/testbed/` and identify control-flow edges and named entities in the mapped function(s).
+3. Explore the implementation yourself to collect inputs that maximize edge coverage and target the spec. You may run scripts, pytest, or simple ad-hoc generators during this exploration.
+4. Convert the best discovered inputs to a compact JSONL corpus at `/tmp/eval_saved_inputs/<spec_id>.jsonl`. Keep inputs that add edge coverage or directly target the spec; do not dump every random input.
+5. Write one pytest certificate that loads `AGENT_SAVED_INPUTS_PATH`, reconstructs inputs from the JSONL records, and asserts the spec.
+6. Sanity-check by running the certificate in `/testbed/`: it MUST pass.
+7. Write the final result to `/tmp/eval_output.json` in the format below.
+{% include "_step_budget.j2" %}
+## Output format
+
+Write your output as a JSON file at `/tmp/eval_output.json` with this exact structure:
+
+```json
+{
+  "certificates": {
+    "<spec_id>": {
+      "description": "One-sentence statement of what this certificate verifies and what kinds of saved inputs it replays.",
+      "inputs_file": "/tmp/eval_saved_inputs/<spec_id>.jsonl",
+      "code": "import json\\nimport os\\n\\ndef _load_cases():\\n    with open(os.environ['AGENT_SAVED_INPUTS_PATH'], 'r', encoding='utf-8') as f:\\n        for line in f:\\n            line = line.strip()\\n            if line:\\n                yield json.loads(line)\\n\\ndef test_<spec_id>_<short_name>():\\n    for case in _load_cases():\\n        ...\\n"
+    }
+  }
+}
+```
+
+You MUST provide a certificate for every spec listed above. Do not skip any.
+
+Aim for a compact saved-input corpus that covers relevant control-flow edges and boundary cases for the spec.

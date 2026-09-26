@@ -1,0 +1,106 @@
+You are an expert software engineer auditing a candidate mutation produced by an upstream LLM (LLM-A) for a specification-alignment benchmark. A separate audit has already decided whether this mutation violates the spec it targeted. Your job is the other half: decide whether it also broke a **different** spec that was supposed to stay intact.
+
+{% include "_verification_intro.j2" %}
+
+The targeted witness's two observations are shown to you below as context for what the mutation does. Whether that divergence is a valid violation of the targeted spec is **not your question** — assume it was settled elsewhere. Judge only preservation.
+
+## What can go wrong
+
+1. **Wrong-spec violation.** The mutation broke a *different* spec (most often one of the other specs LLM-A was supposed to preserve, but possibly an implicit invariant of the codebase). The witness diverges, but the divergence is the consequence of breaking the wrong property. Approving this would label "mutation X violates spec Y" when actually "mutation X violates spec Z, leaving Y intact."
+
+If no other spec is broken, **approve** with category `valid`. Approving here says only that preservation holds; it makes no claim about the targeted spec.
+
+## How to read the spec
+
+- Treat the spec text as a contract written for any conforming implementation. A property is "stated" if the words used either say it explicitly or have only one reasonable reading that includes it. A property is "unstated" if a faithful reading of the spec leaves it open.
+- Do not import requirements from the gold implementation, the function name, or your prior expectations of how this kind of code "ought to" behave. The spec text is the only contract.
+- Audit the other specs properly. For each one whose mapped code this patch touches, or whose behaviour the patch can transitively affect, decide whether the patched implementation still satisfies it. If any other spec is broken, reject as `wrong_spec` even when the targeted spec is also violated. You may skip only those specs whose mapped code the patch provably cannot reach.
+
+{% if probe %}
+## How to read the preservation probe
+
+One other spec comes with a *probe*: that spec's own witness was executed
+against this mutant, and against gold, and the two observations are shown to
+you. This is measurement, not a verdict — it tells you what moved, and you
+decide what the movement means.
+
+- `diverged` — that spec's witness observed something different under this
+  mutation. **This does not by itself mean the spec is broken.** A witness
+  prints a whole return value, log, or state snapshot, while its spec usually
+  constrains one property of it; the mutation may have moved a part of the
+  observation that the spec says nothing about. Compare the two observations,
+  identify precisely *what* changed, and check that change against the probed
+  spec's text. Reject as `wrong_spec` only when the changed part is something
+  that spec actually requires. When the change is outside what that spec
+  constrains, the probe is not evidence of anything and the mutation can still
+  be `valid`.
+- `preserved` — that spec's witness saw no change. Positive evidence, but
+  bounded: it covers only the inputs that witness happens to build, so it does
+  not license skipping the reading-based audit above.
+- `mutant_error` — that witness could not run against the mutant at all
+  (typically it was written against the gold call shape and the mutation
+  changed it). Carries no information in either direction: do **not** read a
+  crashed probe as the spec being violated, and do not read it as preserved
+  either. Judge that spec from the patch, as you would with no probe.
+- `inconclusive` — the probe produced no reading. Same treatment.
+
+**Judge only the probed spec named below.** The other specs are listed for
+context, because a change to shared code is easier to read when you can see
+what else depends on it, but a separate call audits each of them. Do not
+reject on a spec other than the probed one.
+{% else %}
+## No probe for this audit
+
+No probed spec is attached to this call, so this is the reading-based audit:
+work from the patch. Decide, for every other spec whose mapped code the patch
+touches or can transitively affect, whether the patched implementation still
+satisfies it.
+
+A probe is available for only some of the other specs, and its absence means
+nothing at all about the spec — it means that spec was not selected for
+probing. Every other spec still has to be audited by reading the patch.
+{% endif %}
+
+{% include "_verification_witness_reading.j2" %}
+
+{% include "_verification_inputs.j2" %}
+{% if probe %}
+### Preservation probe: {{ probe.spec_id }} — `{{ probe.verdict }}`
+
+This is the spec you are judging. Its own witness was run against this mutant,
+and against gold.
+
+Spec text: {{ probe.spec_text }}
+{% if probe.gold_observation %}
+Its observation on gold:
+```
+{{ probe.gold_observation }}
+```
+{% endif %}
+{% if probe.mutant_observation %}
+Its observation on this mutant:
+```
+{{ probe.mutant_observation }}
+```
+{% endif %}
+{% if probe.error %}
+Probe failure output:
+```
+{{ probe.error }}
+```
+{% endif %}
+{% endif %}
+
+## Output format
+
+Return a single JSON object inside a fenced ```json block at the end of your response. Reason out loud first if it helps, but emit only ONE final JSON block.
+
+```json
+{
+  "verdict": "approve | reject",
+  "category": "valid | wrong_spec",
+  "reasoning": "1-3 sentences. Name the spec you judged broken and quote the span of its text the patched implementation no longer satisfies, or state which specs you checked and why the patch leaves each intact."
+}
+```
+
+Approve only when category is `valid`. Otherwise reject.

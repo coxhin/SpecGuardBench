@@ -1,0 +1,129 @@
+You are an expert software engineer performing spec decomposition for a code analysis pipeline.
+
+## Task
+
+Given a task statement, interface descriptions (with docstrings), and a gold patch implementation, decompose the specifications into atomic specs.
+
+## Definitions
+
+**Spec Categories:**
+- **Behavioral**: What the function must do — any observable behavior, including input-output mappings, error-raising (including the specific error type), side effects on state visible through subsequent API calls. Statable without reference to implementation.
+- **Structural**: How the interface is organized — method signatures, parameters, class hierarchy. Describes the API contract.
+- **Implementation constraint**: Specific algorithmic or design choices explicitly stated in docstrings or comments. Must be explicitly stated in spec text (not inferred from code).
+
+**Error contracts** (e.g., "raises ValueError if shapes don't match") are classified as **behavioral**.
+
+## Merging Rules
+
+Merge specs when they meet either criterion:
+1. **Duplicate**: Same concept expressed in different words across sources.
+2. **Chaining**: Specs with strong causal dependency where violating one necessarily violates the other.
+
+When merging, **retain the original text of all constituent specs** without modification — just group them together.
+
+**Do NOT merge** specs that share implementation but describe genuinely independent requirements.
+
+## Independence Test
+
+"Atomic" means the smallest **independently violable** unit — not the smallest
+sentence. Two specs that cannot be violated separately are one spec, however
+differently they are worded.
+
+Before emitting two specs whose `code_mapping` names the same function, run
+this test on the pair:
+
+1. Name a concrete code change that violates A while leaving B fully satisfied.
+2. Name a concrete code change that violates B while leaving A fully satisfied.
+
+If you cannot name **both**, they are not independent — merge them into a
+single spec carrying both texts. Apply the test to every pair mapped to the
+same function, not just to adjacent ones.
+
+Patterns that reliably fail this test, and must be merged:
+
+- A signature spec whose return type is restated in prose by a behavioral spec
+  of the same function (`-> List[X]` alongside "returns them as a list of X").
+  Returning a tuple violates both; nothing violates only one.
+- A summary line that restates a `Returns:` contract ("Check if v is an X"
+  alongside "True if v is an X, False otherwise").
+- An implementation constraint whose only observable consequence is the
+  behavioral spec's output — if the named internal mechanism is the only one
+  that could produce that output, no mutation separates them.
+- A precondition on the input domain restating what the signature already
+  says ("expects a class, not an instance" alongside `model: Type[BaseModel]`).
+
+A merged spec takes the category of its strongest constituent: behavioral if
+any constituent is behavioral, else structural, else implementation_constraint.
+
+## Extractive-Only Constraint
+
+Every decomposed spec must be copied from specific text in the task statement, docstring, or additional_info — **not inferred from the gold implementation**. The gold implementation is provided as context to help you understand which code corresponds to which spec text, but the spec content itself must come from the source documents.
+
+## Non-Spec Content to Exclude
+
+Ignore during decomposition:
+- Lifecycle/versioning annotations (deprecation notices, versionadded/versionchanged markers)
+- Rationale/context notes (why a design choice was made, references to external issues)
+- Stability/maturity labels
+
+## Input
+
+### Task Statement
+{{ task_statement }}
+
+### Interface Descriptions
+{% for iface in interface_descriptions %}
+#### Interface {{ iface.number }}{% if iface.path %} ({{ iface.path }}){% endif %}
+
+{% if iface.description %}{{ iface.description }}{% endif %}
+
+```python
+{{ iface.code }}
+```
+{% if iface.additional_info %}
+Additional info:
+{{ iface.additional_info }}
+{% endif %}
+{% endfor %}
+
+### Gold Patch Implementation (for context only — do NOT extract specs from this)
+```diff
+{{ gold_patch }}
+```
+
+## Output Format
+
+Return a JSON array of atomic specs. Each spec must have:
+- `spec_id`: A unique identifier (e.g., "S1", "S2", ...)
+- `text`: The original spec text, copied verbatim from the source documents. If merged, include all constituent texts.
+- `category`: One of "behavioral", "structural", "implementation_constraint"
+- `sources`: Array of sources where this spec appears. Values: "task_statement", "docstring", "interface_description", "additional_info"
+- `code_mapping`: Array of code locations in the gold patch that implement this spec. Each entry has:
+  - `file`: File path
+  - `lines`: Line range (e.g., "42-58")
+  - `function`: Function/method name
+- `independence_check`: **Required whenever another spec maps to the same
+  function.** For each such spec, give the two concrete changes from the
+  Independence Test that justify keeping them separate, in this shape:
+  `{"<other_spec_id>": ["<a change to this function that breaks THIS spec
+  while the other still holds>", "<a change that breaks THE OTHER spec while
+  this one still holds>"]}`. Describe changes in terms of the code in front of
+  you, not in terms of this template. If you cannot fill both slots for a
+  pair, you must merge that pair instead of emitting it. Use `{}` only when no
+  other spec maps to this spec's function.
+
+Return ONLY the JSON array, no other text. Example:
+
+```json
+[
+  {
+    "spec_id": "S1",
+    "text": "Input images must have identical dimensions",
+    "category": "behavioral",
+    "sources": ["task_statement", "docstring"],
+    "code_mapping": [
+      {"file": "module.py", "lines": "45-48", "function": "process"}
+    ]
+  }
+]
+```

@@ -1,0 +1,93 @@
+
+You are generating a frozen executable certificate that determines whether a
+function implementation satisfies one atomic natural-language specification.
+Read `/testbed/factory_oracle_harness_guide.md` before working.
+
+The specification is the standard, not the provided implementation. A correct
+certificate rejects every implementation that violates the specification and
+accepts every one that satisfies it, no less and no more. Assert everything
+the specification requires; assert nothing beyond it. Behavior you observe
+while running the provided implementation is evidence about that
+implementation, not about the specification.
+
+Inspect and execute the provided implementation to develop cases for
+`build_cases()`. Measure and maximize edge coverage within the implementation
+scope of this specification: the target function or functions that implement
+the specified behavior, together with relevant delegated or transitively called
+helper functions. Identify uncovered edges in that scope and iteratively improve
+the cases to achieve as high edge coverage as possible.
+
+Write `/tmp/eval_output.json` as soon as `build_cases()` and `check_case()`
+{% if reference_is_mutant -%}
+are written — before you start improving coverage — and overwrite the same file
+after each improvement.
+{%- else -%}
+run without error against the provided implementation — before you start
+improving coverage — and overwrite the same file after each improvement.
+{%- endif %} That file is the
+only thing read back. A certificate that exists solely as a working module
+elsewhere on disk counts for nothing no matter how good it is, and an early
+partial certificate that was written down is worth more than a finished one
+that was not. Improving coverage is open-ended work; treat every improvement as
+optional and the file as mandatory.
+{% include "_step_budget.j2" %}
+Do not spend effort covering unrelated functions merely because they are in the
+same file or Python module. The frozen certificate may also be used to test
+implementations other than the provided implementation.
+
+Keep `check_case(case)` independent of the particular cases returned by
+`build_cases()`. Its assertions must express the specification and work for any
+case satisfying the case contract.
+
+A violation can manifest in many ways, for example through a return value, an
+exception, a side effect, and so on. Determine from the specification itself
+which aspects of the target's observable behavior it constrains. Judge the
+target's actual behavior against what the specification requires for the case;
+do not assume that the target always returns normally.
+
+## Specification {{ spec.spec_id }}
+
+- Category: {{ spec.category }}
+- Text: {{ spec.text }}
+
+## Case contract
+
+{{ spec.case_contract }}
+
+`/tmp/eval_output.json` has this exact structure:
+
+```json
+{
+  "certificates": {
+    "{{ spec.spec_id }}": {
+      "description": "One sentence describing the frozen oracle and generated coverage cases.",
+      "code": "Complete Python module defining build_cases() and check_case(case)."
+    }
+  }
+}
+```
+
+Requirements:
+
+- The file must hold exactly one certificate entry, keyed by
+  `{{ spec.spec_id }}`. Missing, additional, or differently keyed certificate
+  entries are invalid.
+- `build_cases()` yields baseline-generated cases used to measure edge coverage
+  on the provided implementation.
+- Every case must be exactly `{"args": <tuple-or-list>, "kwargs": <dict>}`.
+  Invoke the target with `target(*case["args"], **case["kwargs"])`.
+- Expose the callable your cases invoke as a module-level global named
+  `target`, bound directly to the implementation function or method rather than
+  to a certificate-defined wrapper. You choose which callable that is; the
+  evaluator only reads it to record what the certificate tests.
+- `check_case(case)` contains all assertions and accepts any case satisfying the
+  case contract, including unseen cases supplied later by the evaluator.
+- When invoking the target, handle exception behavior according to the
+  specification for that case. If the target raises an exception that makes its
+  behavior violate the specification, express that violation as an assertion
+  failure. Keep exception handling narrowly scoped to target invocation so
+  errors in the certificate's own oracle logic are not disguised as target
+  violations.
+- You may use monkeypatching when it helps exercise additional edges.
+- Do not put expected results or expected failure flags inside cases.
+- Do not use JSONL, `AGENT_SAVED_INPUTS_PATH`, Hypothesis, or a fuzzing head.

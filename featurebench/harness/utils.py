@@ -1,0 +1,319 @@
+"""Utility functions for FeatureBench evaluation harness."""
+
+import json
+import re
+import pandas as pd
+from pathlib import Path
+from typing import Any, Optional
+
+from featurebench.harness.constants import (
+    KEY_INSTANCE_ID,
+    KEY_MODEL,
+    KEY_N_ATTEMPT,
+    KEY_PREDICTION,
+)
+
+
+class EvaluationError(Exception):
+    """Custom exception for evaluation errors."""
+    pass
+
+
+def get_predictions_from_file(file_path: str | Path) -> list[dict]:
+    """Load predictions from a JSONL file."""
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Predictions file not found: {file_path}")
+
+    predictions = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                pred = json.loads(line)
+                if KEY_PREDICTION not in pred:
+                    if "test_result" in pred and "git_patch" in pred["test_result"]:
+                        pred[KEY_PREDICTION] = pred["test_result"]["git_patch"]
+                    else:
+                        pred[KEY_PREDICTION] = ""
+
+                if KEY_INSTANCE_ID not in pred:
+                    raise ValueError(f"Prediction missing '{KEY_INSTANCE_ID}': {pred}")
+
+                if KEY_MODEL not in pred:
+                    pred[KEY_MODEL] = "unknown"
+
+                if KEY_N_ATTEMPT not in pred:
+                    pred[KEY_N_ATTEMPT] = 1
+
+                predictions.append(pred)
+
+    return predictions
+
+
+def filter_predictions_by_ids(
+    predictions: list[dict],
+    instance_ids: list[str] | None = None
+) -> list[dict]:
+    """Filter predictions by instance IDs."""
+    if instance_ids is None:
+        return predictions
+
+    instance_ids_set = set(instance_ids)
+    return [p for p in predictions if p[KEY_INSTANCE_ID] in instance_ids_set]
+
+
+def get_instance_from_dataset(
+    dataset: pd.DataFrame,
+    instance_id: str
+) -> pd.Series | None:
+    """Get a single instance from the dataset by instance_id."""
+    matches = dataset[dataset[KEY_INSTANCE_ID] == instance_id]
+    if len(matches) == 0:
+        return None
+    return matches.iloc[0]
+
+
+def get_docker_image_name(instance: pd.Series) -> str:
+    """Get Docker image name for an instance."""
+    if "image_name" in instance and pd.notna(instance["image_name"]):
+        image_name = instance["image_name"]
+        if '/' not in image_name or not image_name.startswith(('docker.io/', 'gcr.io/', 'ghcr.io/')):
+            return f"docker.io/{image_name}".lower()
+        return image_name.lower()
+
+    if "instance_image" not in instance or pd.isna(instance["instance_image"]):
+        raise ValueError(f"image_name not found for {instance[KEY_INSTANCE_ID]}")
+
+    image_name = instance["instance_image"]
+    return f"docker.io/libercoders/{image_name}".lower()
+
+
+def str2bool(v: str) -> bool:
+    """Convert string to boolean."""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise ValueError(f"Boolean value expected, got: {v}")
+
+
+def parse_repo_settings(instance: pd.Series) -> dict:
+    """Parse repo_settings from instance data."""
+    repo_settings_str = instance.get("repo_settings", "{}")
+    if not repo_settings_str or pd.isna(repo_settings_str):
+        return {}
+
+    try:
+        if isinstance(repo_settings_str, str):
+            return json.loads(repo_settings_str)
+        elif isinstance(repo_settings_str, dict):
+            return repo_settings_str
+        else:
+            return {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def get_test_config_from_repo_settings(repo_settings: dict) -> dict:
+    """Extract test configuration from repo_settings."""
+    return {
+        "test_cmd": repo_settings.get("test_cmd", "pytest -rA -p no:cacheprovider --color=no"),
+        "timeout_run": repo_settings.get("timeout_run", 600),
+        "timeout_one": repo_settings.get("timeout_one", 10),
+        "use_uv": repo_settings.get("use_uv", False),
+    }
+
+
+def get_docker_runtime_config(repo_settings: dict) -> dict:
+    """Extract Docker runtime configuration from repo_settings."""
+    docker_specs = repo_settings.get("docker_specs", {})
+    run_args = docker_specs.get("run_args", {})
+    custom_docker_args = docker_specs.get("custom_docker_args", [])
+
+    cuda_visible_cfg = run_args.get("cuda_visible_num", run_args.get("cuda_visible_devices", None))
+    if isinstance(cuda_visible_cfg, int):
+        need_gpu = cuda_visible_cfg > 0
+    else:
+        need_gpu = bool(cuda_visible_cfg)
+
+    shm_size = run_args.get("shm_size")
+
+    number_once = run_args.get("number_once", 1)
+    if not isinstance(number_once, int) or number_once <= 0:
+        number_once = 1
+
+    env_vars = {}
+    env_exports = []
+
+    proxy_keywords = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']
+
+    if isinstance(custom_docker_args, list):
+        for arg in custom_docker_args:
+            if not isinstance(arg, str):
+                continue
+
+            if arg.startswith('-e '):
+                env_part = arg.split(' ', 1)[1] if ' ' in arg else ''
+                if '=' in env_part:
+                    key = env_part.split('=')[0].strip()
+                    if key not in proxy_keywords:
+                        env_vars[key] = env_part.split('=', 1)[1]
+
+            elif arg.startswith('-ee '):
+                env_part = arg.split(' ', 1)[1] if ' ' in arg else ''
+                if '=' in env_part:
+                    key = env_part.split('=')[0].strip()
+                    if key not in proxy_keywords:
+                        env_exports.append(f'export {env_part}')
+
+    return {
+        "need_gpu": need_gpu,
+        "shm_size": shm_size,
+        "number_once": number_once,
+        "env_vars": env_vars,
+        "env_exports": env_exports,
+    }
+
+
+def build_test_command(test_cmd: str, timeout_one: Optional[int] = None) -> str:
+    """Build test command with timeout configuration."""
+    if timeout_one is not None and timeout_one > 0:
+        return f"{test_cmd} --timeout={timeout_one}"
+    return test_cmd
+
+
+def preprocess_hf_patch(patch_text: str, raw_fail_to_pass: Any) -> str:
+    """Preprocess HF patch for harness evaluation."""
+    reversed_patch = reverse_unified_patch(patch_text)
+    fail_to_pass_paths = parse_fail_to_pass_paths(raw_fail_to_pass)
+    return remove_patch_operations_for_paths(reversed_patch, fail_to_pass_paths)
+
+
+def reverse_unified_patch(patch_text: str) -> str:
+    """Reverse a unified diff patch so it can be applied in the opposite direction."""
+    if not patch_text:
+        return patch_text
+
+    hunk_header_pattern = re.compile(r"^@@ -(\d+(?:,\d+)?) \+(\d+(?:,\d+)?) @@(.*)$")
+    reversed_lines: list[str] = []
+
+    for line in patch_text.splitlines():
+        if line.startswith("--- "):
+            reversed_lines.append("+++ " + line[4:])
+            continue
+        if line.startswith("+++ "):
+            reversed_lines.append("--- " + line[4:])
+            continue
+
+        match = hunk_header_pattern.match(line)
+        if match:
+            old_range, new_range, tail = match.groups()
+            reversed_lines.append(f"@@ -{new_range} +{old_range} @@{tail}")
+            continue
+
+        if line.startswith("new file mode "):
+            reversed_lines.append(line.replace("new file mode ", "deleted file mode ", 1))
+            continue
+        if line.startswith("deleted file mode "):
+            reversed_lines.append(line.replace("deleted file mode ", "new file mode ", 1))
+            continue
+        if line.startswith("old mode "):
+            reversed_lines.append(line.replace("old mode ", "new mode ", 1))
+            continue
+        if line.startswith("new mode "):
+            reversed_lines.append(line.replace("new mode ", "old mode ", 1))
+            continue
+        if line.startswith("rename from "):
+            reversed_lines.append(line.replace("rename from ", "rename to ", 1))
+            continue
+        if line.startswith("rename to "):
+            reversed_lines.append(line.replace("rename to ", "rename from ", 1))
+            continue
+        if line.startswith("copy from "):
+            reversed_lines.append(line.replace("copy from ", "copy to ", 1))
+            continue
+        if line.startswith("copy to "):
+            reversed_lines.append(line.replace("copy to ", "copy from ", 1))
+            continue
+
+        if line.startswith("+") and not line.startswith("+++ "):
+            reversed_lines.append("-" + line[1:])
+            continue
+        if line.startswith("-") and not line.startswith("--- "):
+            reversed_lines.append("+" + line[1:])
+            continue
+
+        reversed_lines.append(line)
+
+    return "\n".join(reversed_lines) + ("\n" if patch_text.endswith("\n") else "")
+
+
+def _normalize_patch_path(path: str) -> str:
+    path = str(path).strip()
+    if path.startswith("a/") or path.startswith("b/"):
+        path = path[2:]
+    if path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def parse_fail_to_pass_paths(raw_fail_to_pass: Any) -> set[str]:
+    """Parse FAIL_TO_PASS field into normalized file-path set."""
+    if raw_fail_to_pass is None:
+        return set()
+
+    values: Any = raw_fail_to_pass
+    if isinstance(raw_fail_to_pass, str):
+        try:
+            values = json.loads(raw_fail_to_pass)
+        except json.JSONDecodeError:
+            return set()
+
+    if not isinstance(values, list):
+        return set()
+
+    result: set[str] = set()
+    for item in values:
+        if isinstance(item, str) and item.strip():
+            result.add(_normalize_patch_path(item))
+    return result
+
+
+def remove_patch_operations_for_paths(patch_text: str, excluded_paths: set[str]) -> str:
+    """Remove file-level operations in unified diff when file path is excluded."""
+    if not patch_text or not excluded_paths:
+        return patch_text
+
+    normalized_excluded = {_normalize_patch_path(p) for p in excluded_paths if p}
+    lines = patch_text.splitlines(keepends=True)
+    output: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        if not line.startswith("diff --git "):
+            output.append(line)
+            i += 1
+            continue
+
+        block_start = i
+        i += 1
+        while i < len(lines) and not lines[i].startswith("diff --git "):
+            i += 1
+        block = lines[block_start:i]
+        header = block[0].strip()
+        parts = header.split()
+        if len(parts) >= 4:
+            path_a = _normalize_patch_path(parts[2])
+            path_b = _normalize_patch_path(parts[3])
+            should_drop = path_a in normalized_excluded or path_b in normalized_excluded
+        else:
+            should_drop = False
+
+        if not should_drop:
+            output.extend(block)
+
+    return "".join(output)

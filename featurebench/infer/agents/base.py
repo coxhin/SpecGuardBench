@@ -1,0 +1,285 @@
+"""Base agent class for FeatureBench inference."""
+
+import logging
+import re
+import shlex
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+from docker.models.containers import Container
+
+from featurebench.infer.container import ContainerManager
+
+if TYPE_CHECKING:
+    from featurebench.infer.models import TaskInstance
+
+
+class BaseAgent(ABC):
+    """Abstract base class for agents."""
+    _TIMEOUT_MARKER_RE = re.compile(r"\[TIMEOUT after \d+ seconds\]")
+
+    def __init__(
+        self,
+        container_manager: ContainerManager,
+        env_vars: Optional[Dict[str, str]] = None,
+        logger: Optional[logging.Logger] = None,
+        **kwargs
+    ):
+        """Initialize the base agent."""
+        self.cm = container_manager
+        self.env_vars = env_vars or {}
+        self.logger = logger or logging.getLogger(__name__)
+        self._kwargs = kwargs
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Agent name."""
+        pass
+
+    @property
+    @abstractmethod
+    def install_script(self) -> str:
+        """Installation script content."""
+        pass
+
+    @abstractmethod
+    def get_run_command(self, instruction: str) -> str:
+        """Get the command to run the agent with the given instruction."""
+        pass
+
+    def get_env_setup_script(self) -> str:
+        """Get the environment setup script content."""
+        lines = ["#!/bin/bash", ""]
+        for key, value in self.env_vars.items():
+            if value:
+                escaped_value = value.replace("'", "'\\''")
+                lines.append(f"export {key}='{escaped_value}'")
+        return "\n".join(lines)
+
+    def _get_proxy_unset_lines(self) -> List[str]:
+        """Return shell lines to unset proxy at runtime when runtime_proxy is off."""
+        runtime_proxy = str(self.env_vars.get("FB_RUNTIME_PROXY", "")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if runtime_proxy:
+            return []
+        return [
+            "",
+            "# Disable proxy for runtime API calls",
+            "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy",
+        ]
+
+    def _force_timeout_enabled(self) -> bool:
+        """Return whether --force-timeout is enabled for this run."""
+        return str(self.env_vars.get("FB_FORCE_TIMEOUT", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _infer_log_has_timeout_marker(self, log_file: Path) -> bool:
+        """Check whether current agent execution section contains a timeout marker."""
+        try:
+            content = log_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            self.logger.warning(f"Failed to read infer log for timeout detection: {e}")
+            return False
+
+        begin_marker = f"BEGIN Agent Execution: {self.name}"
+        begin_idx = content.rfind(begin_marker)
+        if begin_idx >= 0:
+            content = content[begin_idx:]
+
+        return bool(self._TIMEOUT_MARKER_RE.search(content))
+
+    def install(
+        self,
+        container: Container,
+        log_file: Path
+    ) -> bool:
+        """Install the agent in the container."""
+        self.logger.info(f"Installing {self.name} agent...")
+
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 60 + "\n")
+            f.write(f"BEGIN Agent Installation: {self.name}\n")
+            f.write("=" * 60 + "\n\n")
+
+        try:
+            self.cm.exec_command(
+                container,
+                "mkdir -p /installed-agent",
+                log_file=log_file
+            )
+
+            env_script = self.get_env_setup_script()
+            exit_code, _ = self.cm.exec_command(
+                container,
+                f"cat > /installed-agent/setup-env.sh << 'ENVEOF'\n{env_script}\nENVEOF",
+                log_file=log_file
+            )
+
+            install_script = self.install_script
+            exit_code, _ = self.cm.exec_command(
+                container,
+                f"cat > /installed-agent/install-agent.sh << 'INSTALLEOF'\n{install_script}\nINSTALLEOF",
+                log_file=log_file
+            )
+
+            self.cm.exec_command(
+                container,
+                "chmod +x /installed-agent/*.sh",
+                log_file=log_file
+            )
+
+            exit_code = self.cm.exec_command_stream(
+                container,
+                "source /installed-agent/install-agent.sh",
+                log_file=log_file,
+                workdir="/installed-agent",
+                timeout=1800
+            )
+
+            if exit_code != 0:
+                self.logger.error(f"Agent installation failed with exit code {exit_code}")
+                return False
+
+            self.logger.info(f"{self.name} agent installed successfully")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Agent installation failed: {e}")
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\nERROR: {e}\n")
+            return False
+        finally:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 60 + "\n")
+                f.write(f"END Agent Installation: {self.name}\n")
+                f.write("=" * 60 + "\n\n")
+
+    def pre_run_hook(
+        self,
+        container: Container,
+        log_file: Path
+    ) -> bool:
+        """Pre-run hook for agent-specific setup."""
+        return True
+
+    def post_run_hook(
+        self,
+        container: Container,
+        log_file: Path,
+    ) -> bool:
+        """Post-run hook for agent-specific logging."""
+        return True
+
+    def failure_hook(self, container: Container, log_file: Path) -> None:
+        """Best-effort hook invoked when agent execution fails."""
+        return None
+
+    def pre_run_setup(
+        self,
+        container: Container,
+        instance: "TaskInstance",
+        log_file: Path
+    ) -> bool:
+        """Pre-run setup interface for custom container processing."""
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 60 + "\n")
+            f.write(f"BEGIN Pre-Run Setup: {self.name}\n")
+            f.write(f"Instance: {instance.instance_id}\n")
+            f.write(f"Level: {instance.level}\n")
+            f.write("=" * 60 + "\n\n")
+
+        try:
+            self.logger.debug(f"Pre-run setup for {instance.instance_id} (default: no-op)")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Pre-run setup failed: {e}")
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\nERROR: {e}\n")
+            return False
+        finally:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 60 + "\n")
+                f.write(f"END Pre-Run Setup: {self.name}\n")
+                f.write("=" * 60 + "\n\n")
+
+    def run(
+        self,
+        container: Container,
+        instruction: str,
+        log_file: Path,
+        timeout: Optional[int] = None
+    ) -> bool:
+        """Run the agent with the given instruction."""
+        self.logger.info(f"Running {self.name} agent...")
+
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 60 + "\n")
+            f.write(f"BEGIN Agent Execution: {self.name}\n")
+            f.write("=" * 60 + "\n\n")
+            f.write(f"Instruction:\n{instruction}\n\n")
+            f.write("-" * 60 + "\n\n")
+
+        try:
+            success_pre_run = self.pre_run_hook(container, log_file)
+            if not success_pre_run:
+                raise RuntimeError("Pre-run hook failed")
+
+            run_command = self.get_run_command(instruction)
+
+            full_command = f"source /installed-agent/setup-env.sh && cd /testbed && {run_command}"
+
+            exit_code = self.cm.exec_command_stream(
+                container,
+                full_command,
+                log_file=log_file,
+                timeout=timeout
+            )
+
+            success_run = exit_code == 0
+            success_post_run = self.post_run_hook(container, log_file)
+
+            if success_run and success_post_run:
+                self.logger.info(f"{self.name} agent completed successfully")
+                return True
+
+            if not success_run:
+                if self._force_timeout_enabled() and self._infer_log_has_timeout_marker(log_file):
+                    post_run_state = "passed" if success_post_run else "failed"
+                    self.logger.warning(
+                        f"{self.name} run hit timeout marker (post-run hook {post_run_state}); "
+                        "treating run as successful under --force-timeout"
+                    )
+                    return True
+                raise RuntimeError(f"Agent execution failed with code {exit_code}")
+
+            raise RuntimeError("Post-run hook failed. Agent execution may not be successful.")
+
+        except Exception as e:
+            self.logger.error(f"Agent execution failed: {e}")
+
+            try:
+                self.failure_hook(container, log_file)
+            except Exception as hook_error:
+                self.logger.warning(f"Failure hook error for {self.name}: {hook_error}")
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(f"\n[WARNING] Failure hook error: {hook_error}\n")
+
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\nERROR: {e}\n")
+            return False
+        finally:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 60 + "\n")
+                f.write(f"END Agent Execution: {self.name}\n")
+                f.write("=" * 60 + "\n\n")

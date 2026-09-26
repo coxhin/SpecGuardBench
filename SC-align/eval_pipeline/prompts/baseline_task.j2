@@ -1,0 +1,65 @@
+
+You are generating **executable certificates** that verify whether a function implementation aligns with a set of natural-language specifications.
+
+## Inputs available in the container
+
+- `/testbed/` — the codebase **as currently shipped** (the gold/original implementation has already been applied)
+- `/testbed/specs.json` — the surviving specs you must write certificates for
+- `/testbed/form1b_form6_harness_guide.md` — the canonical guide to the certificate vocabulary you MUST follow. **Read it before writing any certificate.**
+
+## What you must produce
+
+For **each** spec in `/testbed/specs.json`, write **one** executable certificate. A certificate is a self-contained pytest file that:
+
+- Tests the spec from **outside** the function under test, through its public interface only.
+- Uses **only Form 1b + Form 6** patterns from the guide: Hypothesis (`@given`, `@example`), `pytest.raises(..., match=...)`, `pytest.warns`, `caplog`, `tmp_path`, `monkeypatch`, `unittest.mock.patch(target, wraps=original)`, and (where the spec describes multi-call protocols) `hypothesis.stateful.RuleBasedStateMachine`.
+- Will be executed by the harness against (a) the current gold code — where it MUST pass — and (b) a mutated version of the same code that violates this specific spec — where it MUST fail.
+
+## Hard rules (non-negotiable)
+
+1. **No edits to the source under test.** Do NOT insert assertions inside the function body, do NOT modify any file in `/testbed/` other than your own test file. The same certificate must be portable across the original and the mutant.
+2. **No reference implementation.** You cannot compare against a "ground truth" implementation. Verify behavioural properties of the spec, not equivalence to a re-implementation.
+3. **Match exception type AND message.** For exception specs, always combine `pytest.raises(ExceptionType, match="<keyword from spec>")`. A mutant that raises a different exception with a similar message must still be caught.
+4. **Use `wraps=original` when observing the call graph.** `patch('mod.fn', wraps=mod.fn)` records calls without changing behaviour. Bare `Mock()` substitutes the function and breaks the test.
+5. **Patch where it's looked up.** If `consumer.py` does `from x import f`, patch `consumer.f`, not `x.f`.
+6. **For every named entity in a spec** (function, method, module, attribute), ask: could a mutant produce the right output without calling that entity? If yes, add a `patch(wraps=...)` call-count or call-args assertion.
+
+## Specifications
+
+{% for spec in specs %}
+### {{ spec.spec_id }}: {{ spec.category }}
+{{ spec.text }}
+
+{% endfor %}
+
+## Procedure
+
+1. Read `/testbed/form1b_form6_harness_guide.md` end-to-end.
+2. For each spec, locate the relevant code in `/testbed/` and identify the named entities you can observe via `patch(wraps=...)`.
+3. Draft one certificate per spec. Each certificate should be a complete, importable pytest file.
+4. Sanity-check by mentally running each certificate against the gold code: it MUST pass.
+5. Write the final result to `/tmp/eval_output.json` in the format below.
+{% include "_step_budget.j2" %}
+## Output format
+
+Write your output as a JSON file at `/tmp/eval_output.json` with this exact structure:
+
+```json
+{
+  "certificates": {
+    "<spec_id>": {
+      "description": "One-sentence statement of what this certificate verifies and how a mutant would fail it.",
+      "code": "# full runnable pytest file — Form 1b + Form 6 only\nfrom hypothesis import given, strategies as st\nimport pytest\nfrom unittest.mock import patch\n\n@given(...)\ndef test_<spec_id>_<short_name>(...):\n    ...\n"
+    }
+  }
+}
+```
+
+You MUST provide a certificate for EVERY spec listed above. Do not skip any.
+
+## What "passes on gold, fails on mutant" looks like
+
+- Gold (current code in `/testbed/`): `pytest your_cert.py` exits 0.
+- Mutant (the spec's mutation applied on top of gold): `pytest your_cert.py` exits non-zero — at least one assertion or `pytest.raises` mismatch fires.
+
+A certificate that passes on both is too weak (no signal). A certificate that fails on both is buggy. Aim for the cert that distinguishes them.

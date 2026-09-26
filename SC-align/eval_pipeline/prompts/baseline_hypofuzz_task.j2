@@ -1,0 +1,133 @@
+
+You are generating **executable certificates** that verify whether a function implementation aligns with a set of natural-language specifications.
+
+## Inputs available in the container
+
+- `/testbed/` — the codebase **as currently shipped** (the gold/original implementation has already been applied)
+- `/testbed/specs.json` — the surviving specs you must write certificates for
+- `/testbed/hypofuzz_harness_guide.md` — the canonical guide to the certificate vocabulary you MUST follow. **Read it before writing any certificate.**
+
+## What you must produce
+
+For **each** spec in `/testbed/specs.json`, write **one** executable certificate. A certificate is a self-contained pytest file that:
+
+- Tests the spec from **outside** the function under test, through its public interface only.
+- Is a **fuzz-driven Hypothesis test**. The certificate is executed by a coverage-guided fuzzer that needs real input generation — see the hard rules below.
+- Will be executed against (a) the current gold code — where it MUST pass — and (b) a mutated version of the same code that violates this specific spec — where it MUST fail.
+
+## Hard rules (non-negotiable)
+
+1. **No edits to the source under test.** Do not modify any file in `/testbed/` other than your own test file.
+
+2. **No reference implementation.** Verify behavioural properties of the spec.
+
+3. **Every certificate is a fuzz-driven Hypothesis test, NOT a collection of special-case tests.**
+
+   - At least one `@given(arg=strategy)` per test function. The strategy must produce a non-trivial input space (see rule 4 below).
+
+   - `@example(...)` is PERMITTED — and encouraged — as adversarial seeds: concrete inputs you suspect might break the spec, layered on top of `@given`. The fuzzer uses them as warm-up seeds before random exploration. Whether to provide `@example` seeds is your choice; both shapes below are acceptable.
+
+   - But `@example` never replaces `@given`. A cert whose runtime behaviour is determined ENTIRELY by hardcoded literals — whether via `@example`-only, `phases=[Phase.explicit]`, `st.just(literal)`, or a hardcoded class definition used as the sole input — is a "special-case test" and fails this rule. The fuzz strategy must do real work on every run.
+
+   - `@settings(deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])` is REQUIRED. NEVER set `phases=[Phase.explicit]` — that disables input generation.
+
+   - Every parameter bound by `@given` MUST be used in the test body. A cert that declares `@given(x=st.text())` and then ignores `x` while asserting on a hardcoded value is rejected.
+
+4. **"Real strategy" definition:**
+   - Built-in Hypothesis strategies (`st.integers`/`text`/`floats`/`lists`/`dictionaries`/`builds`/`one_of`/`recursive`/`from_type`/...) — OK.
+   - User-defined `@st.composite` strategies that introduce randomness — OK.
+   - `st.just(literal)` as the sole strategy — NOT OK.
+   - `st.sampled_from(short_list)` with < 20 distinct elements as the sole strategy — NOT OK.
+   - A hardcoded class definition or hardcoded typing annotation used as the sole input — NOT OK. If the function's input shape isn't covered by a built-in strategy, write an `@st.composite` recipe that generates the shape.
+
+5. **Match exception type AND message for exception specs:** `pytest.raises(ExceptionType, match="<keyword from spec>")`.
+
+6. **Use `wraps=original` when observing the call graph** (`unittest.mock.patch(target, wraps=original)`). Bare `Mock()` breaks the test. `patch(wraps=...)` is an assertion tool — it does NOT count as input generation; rule 3 still applies.
+
+7. **Patch where the target is looked up, not where it is defined.**
+
+## Two minimal shapes
+
+Choose whichever fits the spec — both are acceptable.
+
+```python
+# Shape A — fuzz with adversarial seeds (your choice to add):
+from hypothesis import given, example, settings, HealthCheck, strategies as st
+
+@given(x=st.integers())
+@example(x=0)
+@example(x=-1)
+@settings(
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+def test_property(x):
+    result = function_under_test(x)
+    assert <observable property>
+```
+
+```python
+# Shape B — pure fuzz, no seeds:
+from hypothesis import given, settings, HealthCheck, strategies as st
+
+@given(x=st.integers())
+@settings(
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+def test_property(x):
+    result = function_under_test(x)
+    assert <observable property>
+```
+
+## Specifications
+
+{% for spec in specs %}
+### {{ spec.spec_id }}: {{ spec.category }}
+{{ spec.text }}
+
+{% endfor %}
+
+## Procedure
+
+1. Read `/testbed/hypofuzz_harness_guide.md` end-to-end.
+2. For each spec, locate the relevant code in `/testbed/` and identify the input shape the spec talks about. If a built-in Hypothesis strategy doesn't cover it, design an `@st.composite` strategy.
+3. Draft one certificate per spec. Each certificate should be a complete, importable pytest file.
+4. Sanity-check by mentally running each certificate against the gold code: it MUST pass.
+5. Write the final result to `/tmp/eval_output.json` in the format below.
+{% include "_step_budget.j2" %}
+## Output format
+
+Write your output as a JSON file at `/tmp/eval_output.json` with this exact structure:
+
+```json
+{
+  "certificates": {
+    "<spec_id>": {
+      "description": "One-sentence statement of what this certificate verifies and how a mutant would fail it.",
+      "code": "# full runnable pytest file — fuzz-driven Hypothesis only\nfrom hypothesis import given, settings, HealthCheck, strategies as st\n\n@given(...)\n@settings(deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])\ndef test_<spec_id>_<short_name>(...):\n    ...\n"
+    }
+  }
+}
+```
+
+You MUST provide a certificate for EVERY spec listed above. Do not skip any.
+
+## What "passes on gold, fails on mutant" looks like
+
+- Gold (current code in `/testbed/`): the fuzz campaign on `your_cert.py` finds NO falsifying example.
+- Mutant (the spec's mutation applied on top of gold): the fuzz campaign on the same `your_cert.py` finds at least one falsifying example (assertion or `pytest.raises` mismatch).
+
+A certificate that the fuzzer can't falsify on either side is too weak (no signal). A certificate that the fuzzer falsifies on the gold code is buggy. Aim for the cert that distinguishes them.
+{% if previous_violations %}
+
+## Previous attempt rejected
+
+Your previous output failed the fuzz-compliance audit. Rewrite ALL certificates to fix the following:
+
+{% for v in previous_violations %}
+- **{{ v.rule_id }}**{% if v.test_func %} (in `{{ v.test_func }}`){% endif %}: {{ v.message }}
+{% endfor %}
+
+Re-read rules 3 and 4 above. Replace every `st.just(literal)` / tiny `st.sampled_from` / cosmetic `@given` with a real fuzz strategy. Then emit the same JSON output format to `/tmp/eval_output.json`.
+{% endif %}

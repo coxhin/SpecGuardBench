@@ -1,0 +1,82 @@
+[env_vars]
+HF_ENDPOINT = ""
+HF_TOKEN = ""
+GITHUB_TOKEN = ""
+
+[infer]
+download_cache_dir = ""
+
+[infer_config.codex]
+OPENAI_API_KEY = ""
+OPENAI_BASE_URL = ""
+CODEX_REASONING_EFFORT = ""
+CODEX_VERSION = ""
+
+[infer_config.claude_code]
+ANTHROPIC_API_KEY = ""
+ANTHROPIC_BASE_URL = ""
+CLAUDE_CODE_VERSION = ""
+
+[infer_config.opencode]
+OPENCODE_API_KEY = ""
+OPENCODE_BASE_URL = ""
+OPENCODE_WIRE_API = "openai-compatible"
+OPENCODE_VARIANT = ""
+OPENCODE_CONTEXT_LIMIT = ""
+OPENCODE_OUTPUT_LIMIT = ""
+
+[infer_config.opencode_glm]
+OPENCODE_API_KEY = ""
+OPENCODE_BASE_URL = ""
+OPENCODE_WIRE_API = "openai-compatible"
+OPENCODE_VARIANT = ""
+OPENCODE_CONTEXT_LIMIT = ""
+OPENCODE_OUTPUT_LIMIT = ""
+
+[eval_pipeline]
+output_dir = "SC-align/eval_output"
+n_concurrent = 12
+max_agent_steps = 80
+hypothesis_timeout = 120
+harness_form = "factory_oracle"
+container_isolation = "arm"
+control_arm_k = 3
+saved_inputs_replay_timeout_seconds = 900
+instance_ids = []
+
+[eval_pipeline.baseline.codex]
+agent_config = "codex"
+model = "gpt-5.6-sol"
+tool_version = "0.117.0"
+price_input_per_mtok = 4.0
+price_output_per_mtok = 20.0
+price_cache_read_per_mtok = 0.4
+price_cache_write_per_mtok = 0.0
+
+[eval_pipeline.baseline.claude_code]
+agent_config = "claude_code"
+model = "claude-opus-5"
+tool_version = "2.1.77"
+price_input_per_mtok = 5.0
+price_output_per_mtok = 25.0
+price_cache_read_per_mtok = 0.5
+price_cache_write_per_mtok = 6.25
+
+[eval_pipeline.baseline.opencode]
+agent_config = "opencode"
+model = "deepseek-v4-pro"
+tool_version = "1.18.25"
+price_input_per_mtok = 1.32
+price_output_per_mtok = 3.96
+price_cache_read_per_mtok = 0.044
+price_cache_write_per_mtok = 0.0
+
+[eval_pipeline.baseline.opencode_glm]
+adapter = "opencode"
+agent_config = "opencode_glm"
+model = "glm-5.2"
+tool_version = "1.18.25"
+price_input_per_mtok = 1.4
+price_output_per_mtok = 4.4
+price_cache_read_per_mtok = 0.26
+price_cache_write_per_mtok = 0.0

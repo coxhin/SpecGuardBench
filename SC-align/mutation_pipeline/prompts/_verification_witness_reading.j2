@@ -1,0 +1,4 @@
+## How to read the witness
+
+- Identify what `observe_case` actually returns about the function under test (return value, side effect, exception, call sequence, ...), and what it leaves out.
+- The observation is the returned dict and nothing else. The observer is forbidden from printing; to observe a side effect it must capture it and return it — warnings via `warnings.catch_warnings(record=True)`, log records via a handler, the target's own printing via `contextlib.redirect_stdout`, an in-place argument change by reading the argument back. An observer that needed one of these and did not do it has not observed the thing it claims to observe.
